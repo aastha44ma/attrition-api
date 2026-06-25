@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import joblib
 import pandas as pd
@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Enable CORS so Next.js can talk to this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,35 +21,39 @@ expected_features = joblib.load('feature_columns.pkl')
 class EmployeeData(BaseModel):
     MonthlyIncome: float
     Age: int
-    OverTime: str # "Yes" or "No"
+    OverTime: str
     YearsAtCompany: int
-    # Add other top features you want the HR director to input
 
 @app.post("/predict")
 def predict_attrition(data: EmployeeData):
-    # 1. Convert incoming JSON to a DataFrame
-    input_df = pd.DataFrame([data.dict()])
-    
-    # 2. Create a blank dataframe with the exact columns the model expects
-    model_input = pd.DataFrame(columns=expected_features)
-    model_input.loc[0] = 0 # Fill with 0s initially
-    
-    # 3. Map the user inputs into the correct columns
-    model_input['MonthlyIncome'] = input_df['MonthlyIncome']
-    model_input['Age'] = input_df['Age']
-    model_input['YearsAtCompany'] = input_df['YearsAtCompany']
-    if input_df['OverTime'][0] == "Yes":
-        model_input['OverTime_Yes'] = 1
+    try:
+        # 1. Create a dictionary with ALL expected features, defaulting to 0
+        input_dict = {col: 0 for col in expected_features}
         
-    # 4. Scale the numeric columns just like in Colab
-    # (Ensure you are scaling the exact same numeric features used in training)
-    numeric_cols = ['MonthlyIncome', 'Age', 'YearsAtCompany'] 
-    model_input[numeric_cols] = scaler.transform(model_input[numeric_cols])
-    
-    # 5. Predict!
-    probability = model.predict_proba(model_input)[0][1]
-    
-    return {
-        "flight_risk_score": round(probability * 100, 1),
-        "risk_level": "High" if probability > 0.5 else "Low"
-    }
+        # 2. Inject the data the HR Director just typed into the Next.js form
+        input_dict['MonthlyIncome'] = data.MonthlyIncome
+        input_dict['Age'] = data.Age
+        input_dict['YearsAtCompany'] = data.YearsAtCompany
+        
+        if data.OverTime == "Yes" and 'OverTime_Yes' in input_dict:
+            input_dict['OverTime_Yes'] = 1
+            
+        # 3. Convert to a Pandas DataFrame
+        model_input = pd.DataFrame([input_dict])
+        
+        # 4. The Magic Fix: Ask the scaler exactly which columns it trained on, and scale those
+        numeric_cols = scaler.feature_names_in_
+        model_input[numeric_cols] = scaler.transform(model_input[numeric_cols])
+        
+        # 5. Predict the flight risk!
+        probability = model.predict_proba(model_input)[0][1]
+        
+        return {
+            "flight_risk_score": round(probability * 100, 1),
+            "risk_level": "High" if probability > 0.5 else "Low"
+        }
+
+    except Exception as e:
+        # If anything breaks, it will print to the Render logs and send the real error to Next.js
+        print(f"Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
